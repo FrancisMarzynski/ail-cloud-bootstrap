@@ -1,0 +1,23 @@
+# Tool config only: this repo has no package and no runtime dependencies
+# (stdlib Python + bash). Tool versions are pinned in scripts/check (uvx).
+
+# Lint rules are a ratchet: add a rule whenever a review catches a mechanical
+# mistake.
+[tool.ruff]
+target-version = "py313"
+extend-exclude = [".claude", ".sdlc-worktrees"]
+
+[tool.ruff.lint]
+select = ["F", "E9", "B", "PLE", "UP", "I", "S"]
+ignore = [
+  "S603", "S607",  # the installer, hook and tests exist to run git/python3 with fixed argv
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S108"]  # asserts are how tests fail; fake paths like /tmp/demo are test data, never opened
+
+[tool.basedpyright]
+include = ["hooks", "tests"]  # scripts/check also names bin/ail-memory (no .py suffix)
+exclude = ["**/__pycache__", ".claude", ".venv"]
+pythonVersion = "3.13"
+typeCheckingMode = "basic"
