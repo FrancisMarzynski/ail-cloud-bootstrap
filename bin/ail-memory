@@ -4,7 +4,7 @@
 Contract (v1, unchanged): one JSON request {version, sql, params} on stdin; the result
 on stdout; on failure a bounded v1 JSON error on stderr that never contains the
 endpoint address, the Authorization value, the SQL or its parameters. HTTPS only, no
-redirects, no automatic retry. `endpoint()` and `exchange()` are shared with the
+redirects, no automatic retry. `prepare()` and `exchange()` are shared with the
 bundle fetcher (hooks/cloud_bundle.py) so both requests follow the same rules.
 """
 
@@ -57,8 +57,9 @@ def deadline(_signum: int, _frame: Any) -> None:
     raise TimeoutError("request deadline")
 
 
-def endpoint(suffix: str = "") -> tuple[str, float, dict[str, str]]:
-    """The outgoing URL (endpoint path + suffix), timeout and auth headers; ValueError when unsafe."""
+def prepare(method: str, suffix: str = "", data: bytes | None = None,
+            headers: dict[str, str] | None = None) -> tuple[urllib.request.Request, float]:
+    """One request to the endpoint (its path + suffix) and its timeout; ValueError when unsafe."""
     url = os.environ.get("AIL_MEMORY_URL", "")
     parts = urllib.parse.urlsplit(url)
     loopback = (os.environ.get("AIL_MEMORY_ALLOW_LOOPBACK") == "1"
@@ -72,7 +73,7 @@ def endpoint(suffix: str = "") -> tuple[str, float, dict[str, str]]:
     timeout = float(os.environ.get("AIL_MEMORY_TIMEOUT_SECONDS", "15"))
     if not math.isfinite(timeout) or not 1 <= timeout <= 60:
         raise ValueError("timeout")
-    headers: dict[str, str] = {}
+    headers = dict(headers or {})
     authorization = os.environ.get("AIL_MEMORY_AUTHORIZATION")
     if authorization is None:
         # Only the Claude cloud proxy injects the credential; anywhere else nothing is sent.
@@ -85,8 +86,11 @@ def endpoint(suffix: str = "") -> tuple[str, float, dict[str, str]]:
     path = (parts.path.rstrip("/") + suffix) if suffix else (parts.path or "/")
     path = urllib.parse.urlunsplit(("", "", path, parts.query, ""))
     if loopback:
-        return f"http://127.0.0.1:{parts.port or 80}{path}", timeout, headers
-    return f"https://{parts.netloc}{path}", timeout, headers
+        request = urllib.request.Request(f"http://127.0.0.1:{parts.port or 80}{path}", data=data, headers=headers,
+                                         method=method)
+    else:
+        request = urllib.request.Request(f"https://{parts.netloc}{path}", data=data, headers=headers, method=method)
+    return request, timeout
 
 
 def exchange(request: urllib.request.Request, timeout: float, limit: int) -> tuple[int, bytes]:
@@ -124,7 +128,6 @@ def exchange(request: urllib.request.Request, timeout: float, limit: int) -> tup
 
 def main() -> int:
     try:
-        url, timeout, headers = endpoint()
         raw = sys.stdin.buffer.read(REQUEST_LIMIT + 1)
         if len(raw) > REQUEST_LIMIT:
             raise ValueError("request size")
@@ -137,8 +140,7 @@ def main() -> int:
         body = json.dumps(request, ensure_ascii=False, allow_nan=False).encode()
         if len(body) > REQUEST_LIMIT:
             raise ValueError("request size")
-        outgoing = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json", **headers},
-                                          method="POST")
+        outgoing, timeout = prepare("POST", data=body, headers={"Content-Type": "application/json"})
     except (ValueError, TypeError, UnicodeError, RecursionError, OSError):
         return failure("not_executed", "configuration", "Memory request blocked: invalid input or configuration.")
 
