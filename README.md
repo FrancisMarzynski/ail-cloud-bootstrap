@@ -16,14 +16,21 @@ See `docs/specs/` for the approved design and `CONTEXT.md` for the vocabulary.
 
 ## Activation (the pinned installer line)
 
-The cloud environment's setup script runs `cloud/setup.sh` from this repository at a pinned commit. The pin is the full 40-character hash of a reviewed `main` commit; a branch name, tag or short hash is refused, and setup checks that the checked-out commit equals the pin before installing anything. Setup needs no credentials and makes no request to the memory endpoint.
+The cloud environment's setup script runs `cloud/setup.sh` from this repository at a pinned commit. The pin is the full 40-character hash of a reviewed `main` commit; a branch name, tag or short hash is refused. The line below fetches only that hash into an empty repository and checks that the checked-out commit equals the pin before it runs anything from the checkout; `cloud/setup.sh` then checks the pin again before installing anything. Setup needs no credentials and makes no request to the memory endpoint.
 
 ```sh
 PIN=<full 40-character commit hash of a reviewed main commit>
 SRC=https://github.com/FrancisMarzynski/ail-cloud-bootstrap.git
-dir="$(mktemp -d)" && git clone --quiet "$SRC" "$dir" \
-  && git -C "$dir" -c advice.detachedHead=false checkout --quiet "$PIN" \
-  && bash "$dir/cloud/setup.sh" "$SRC" "$PIN"
+if [ "${#PIN}" -eq 40 ] && [ -z "$(printf '%s' "$PIN" | tr -d 0-9a-f)" ] \
+  && dir="$(mktemp -d)" && git init --quiet "$dir" \
+  && git -C "$dir" fetch --quiet --no-tags --depth=1 "$SRC" "$PIN" \
+  && git -C "$dir" -c advice.detachedHead=false checkout --quiet --detach FETCH_HEAD \
+  && [ "$(git -C "$dir" rev-parse HEAD)" = "$PIN" ]; then
+  bash "$dir/cloud/setup.sh" "$SRC" "$PIN"
+else
+  echo 'ail-cloud-bootstrap: pin refused (not a full commit hash, or not this commit); nothing was run' >&2
+  exit 1
+fi
 ```
 
 Setup installs the checkout at `~/ail-cloud-bootstrap`, links `~/.local/bin/ail-memory` to its client, and registers exactly one `SessionStart` hook that runs `cloud/startup.sh` for Claude (`~/.claude/settings.json`) and for Codex (`~/.codex/config.toml`). Unrelated settings are preserved. Anything it replaces is first moved or copied to `~/.ail-cloud-bootstrap-backup/<YYYYMMDD-HHMMSS>/`. Running it again with the same pin changes nothing.
