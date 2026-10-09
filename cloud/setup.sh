@@ -144,8 +144,8 @@ def plan_codex(command: str) -> str | None:
     fail("cannot add the startup hook to ~/.codex/config.toml without changing other settings")
 
 
-def git(*args: str) -> str:
-    result = subprocess.run(["git", "-C", str(checkout), *args], capture_output=True, text=True)
+def git(*args: str, where: pathlib.Path = checkout) -> str:
+    result = subprocess.run(["git", "-C", str(where), *args], capture_output=True, text=True)
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
@@ -176,12 +176,13 @@ def backup_dir() -> pathlib.Path:
     return stamp_dir
 
 
-def move_aside(path: pathlib.Path) -> None:
+def move_aside(path: pathlib.Path) -> pathlib.Path:
     """Move an existing file, directory or link to the backup; never delete it."""
     saved = backup_dir() / path.relative_to(home)
     saved.parent.mkdir(parents=True, exist_ok=True)
     os.rename(path, saved)
     print(f"backed up {path.relative_to(home)}")
+    return saved
 
 
 def write(path: pathlib.Path, text: str) -> None:
@@ -205,18 +206,25 @@ claude_settings = plan_claude(f"bash {startup} claude")
 codex_config = plan_codex(f"bash {startup} codex")
 
 if not checkout_current():
-    if os.path.lexists(checkout):
-        move_aside(checkout)
-    # Copy next to the target first, so the final step is one rename on the same filesystem.
-    landing = home / f".ail-cloud-bootstrap-incoming-{os.getpid()}"
+    # The staged tree may sit on another filesystem (TMPDIR), where a move is a copy that can
+    # fail part-way. So copy it into a fresh directory inside HOME and verify it there; the old
+    # checkout is touched only after that, and the switch itself is one rename. A unique
+    # mkdtemp name means a directory left by a crashed earlier run is never reused.
+    landing = pathlib.Path(tempfile.mkdtemp(dir=home, prefix=".ail-cloud-bootstrap-incoming-"))
+    incoming = landing / "ail-cloud-bootstrap"
     try:
-        shutil.move(str(staged), str(landing))
-        os.rename(landing, checkout)
+        shutil.move(str(staged), str(incoming))
+        if git("rev-parse", "HEAD", where=incoming) != pin:
+            sys.exit(f"ail-cloud-bootstrap setup failed: the copied checkout does not equal pin {pin}")
+        saved = move_aside(checkout) if os.path.lexists(checkout) else None
+        try:
+            os.rename(incoming, checkout)
+        except OSError:
+            if saved is not None:
+                os.rename(saved, checkout)  # put the old checkout back where the hooks expect it
+            raise
     finally:
-        if landing.exists():
-            shutil.rmtree(landing)
-    if git("rev-parse", "HEAD") != pin:
-        sys.exit(f"ail-cloud-bootstrap setup failed: the installed checkout does not equal pin {pin}")
+        shutil.rmtree(landing, ignore_errors=True)  # only the directory this run created
     print(f"installed ail-cloud-bootstrap at {pin}")
 
 target = str(checkout / "bin/ail-memory")
