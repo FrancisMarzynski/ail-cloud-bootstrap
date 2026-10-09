@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# The one verification command for this repo. The builder's finish line, the
+# Stop hook, `sdlc gate`, and CI all run exactly this. Add checks here, never
+# around it. No dependency sync: stdlib Python + bash; tool versions are pinned here.
+# `scripts/check --static` runs only lint, shell syntax and types (used by `sdlc lock`).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+RUFF=ruff@0.16.9
+BASEDPYRIGHT=basedpyright@1.40.1
+
+# Python files without a .py suffix must be named so the tools see them. Paths
+# that do not exist yet (the repo is built up spec by spec) are skipped here.
+EXTENSIONLESS_PY=(bin/ail-memory)
+TYPED_DIRS=(hooks tests)
+
+existing() { for path in "$@"; do [[ -e "$path" ]] && printf '%s\n' "$path"; done; return 0; }
+# bash 3.2 (macOS) has no mapfile and treats an empty array as unset under `set -u`.
+collect() { local name="$1"; shift; eval "$name=()"; local line; while IFS= read -r line; do eval "$name+=(\"\$line\")"; done < <(existing "$@"); }
+
+step() { printf '\n== %s\n' "$1"; }
+
+step "lint (ruff)"
+collect extra "${EXTENSIONLESS_PY[@]}"
+uvx --quiet "$RUFF" check . ${extra[@]+"${extra[@]}"}
+
+step "shell syntax (bash -n)"
+while IFS= read -r f; do bash -n "$f"; done < <(find scripts cloud bin -type f \( -name '*.sh' -o -name check -o -name sdlc-stop-hook \) 2>/dev/null | sort)
+
+step "types (basedpyright)"
+collect typed "${TYPED_DIRS[@]}" "${EXTENSIONLESS_PY[@]}"
+uvx --quiet "$BASEDPYRIGHT" ${typed[@]+"${typed[@]}"}
+
+if [[ "${1-}" == "--static" ]]; then exit 0; fi
+
+step "tests (unit, end-to-end, acceptance)"
+python3 -m unittest discover -s tests -t .
+
+printf '\n✓ check passed\n'
