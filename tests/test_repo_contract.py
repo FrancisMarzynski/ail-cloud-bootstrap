@@ -1,4 +1,4 @@
-"""The run contract the SDLC gate depends on: if this breaks, `sdlc gate` cannot be trusted."""
+"""The check configuration the verification command depends on: if this breaks, the check cannot be trusted."""
 
 import json
 import os
@@ -6,17 +6,17 @@ import pathlib
 import unittest
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
-REQUIRED_KEYS = {"check", "static", "acceptance", "acceptance_dir", "default_branch"}
+REQUIRED_KEYS = {"check", "static", "default_branch"}
 
 
 def load_contract() -> dict[str, object]:
-    data = json.loads((REPO / ".sdlc.json").read_text())
+    data = json.loads((REPO / ".check.json").read_text())
     assert isinstance(data, dict)
     return data
 
 
 class RepoContract(unittest.TestCase):
-    def test_sdlc_json_names_every_required_command(self) -> None:
+    def test_check_json_names_every_required_command(self) -> None:
         # Catches a missing or renamed key that would make the gate skip a stage.
         # Misses: whether each command actually passes (scripts/check itself proves that).
         self.assertTrue(REQUIRED_KEYS <= load_contract().keys())
@@ -28,16 +28,13 @@ class RepoContract(unittest.TestCase):
         self.assertTrue(os.access(check, os.X_OK))
 
     def test_acceptance_folder_exists_and_is_collected_by_the_check(self) -> None:
-        # Catches locked tests that would be written where the gate never looks.
-        acceptance = REPO / str(load_contract()["acceptance_dir"])
-        self.assertTrue((acceptance / "__init__.py").is_file())
+        # Catches kept acceptance tests sitting where the check never looks.
+        self.assertTrue((REPO / "tests" / "acceptance" / "__init__.py").is_file())
 
-    def test_full_lane_paths_are_globs_of_strings(self) -> None:
-        # Catches a malformed list, which the gate treats as a hard failure.
-        paths = load_contract().get("full_lane_paths", [])
-        self.assertIsInstance(paths, list)
-        assert isinstance(paths, list)
-        self.assertTrue(all(isinstance(p, str) and p for p in paths))
+    def test_v1_process_files_are_gone(self) -> None:
+        # Catches a stale v1 contract or stop-hook registration coming back.
+        for stale in (".sdlc.json", ".claude/settings.json", ".codex/config.toml"):
+            self.assertFalse((REPO / stale).exists(), stale)
 
     def test_stop_hook_is_executable(self) -> None:
         # Catches an agent being allowed to end a turn with a red check.

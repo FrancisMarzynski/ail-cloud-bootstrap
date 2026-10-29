@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Stop / SubagentStop hook for Claude Code and Codex: an agent may not end its
-# turn while the repo's check (.sdlc.json "check", default scripts/check) is red. Exit 2 + stderr = "keep working, here's why".
+# turn while the repo's check (.check.json "check", default scripts/check) is red. Exit 2 + stderr = "keep working, here's why".
 # Skips when nothing changed, when the exact tree already passed, and during the
 # SDLC test-writing phase (acceptance tests are red by design until `sdlc lock`).
 set -uo pipefail
@@ -13,7 +13,7 @@ gitdir="$(git rev-parse --absolute-git-dir)"
 
 [[ "$(cat "$gitdir/sdlc-phase" 2>/dev/null)" == "tests" ]] && exit 0
 
-base="origin/$(python3 -c 'import json;print(json.load(open(".sdlc.json"))["default_branch"])' 2>/dev/null || echo main)"
+base="origin/$(python3 -c 'import json;print(json.load(open(".check.json"))["default_branch"])' 2>/dev/null || echo main)"
 untracked="$(git ls-files --others --exclude-standard)"
 # Skip only when we can prove nothing changed. If the base can't be resolved
 # (no remote, not fetched, offline), fail safe: run the check.
@@ -29,7 +29,7 @@ active="$(printf '%s' "$input" | python3 -c 'import json,sys;print(json.load(sys
 [[ "$active" == "True" ]] || echo 0 > "$gitdir/sdlc-stop-blocks"
 blocks="$(cat "$gitdir/sdlc-stop-blocks" 2>/dev/null || echo 0)"
 
-check="$(python3 -c 'import json;print(json.load(open(".sdlc.json"))["check"])' 2>/dev/null || echo scripts/check)"
+check="$(python3 -c 'import json;print(json.load(open(".check.json"))["check"])' 2>/dev/null || echo scripts/check)"
 if out="$(bash -c "$check" 2>&1)"; then
   echo "$key" > "$gitdir/sdlc-check-pass"; echo 0 > "$gitdir/sdlc-stop-blocks"; exit 0
 fi

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# The one verification command for this repo. The builder's finish line, the
-# Stop hook, `sdlc gate`, and CI all run exactly this. Add checks here, never
+# The one verification command for this repo. The builder's finish line and CI
+# both run exactly this. Add checks here, never
 # around it. No dependency sync: stdlib Python + bash; tool versions are pinned here.
-# `scripts/check --static` runs only lint, shell syntax and types (used by `sdlc lock`).
+# `scripts/check --static` runs only lint, shell syntax and types.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
