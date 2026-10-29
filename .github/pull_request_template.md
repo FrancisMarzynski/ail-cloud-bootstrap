@@ -1,4 +1,10 @@
-**Spec:** `docs/specs/<file>` · <one plain sentence: what changes for the user>
+NOT READY: <what remains>
+
+## Restatement
+
+- **Goal:**
+- **Done means:**
+- **Proof:**
 
 ## Summary
 
@@ -6,9 +12,9 @@
 
 ## Acceptance
 
-- [ ] <scenario in plain words> - `<behavioural test or workflow evidence>`
+- [ ] <scenario and evidence>
 
-Gate: `scripts/check` · CI: <link> · Review: <verdict>
+Check: `scripts/check` · CI: <link> · Review: <verdict>
 
 ## Evidence
 

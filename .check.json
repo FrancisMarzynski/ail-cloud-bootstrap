@@ -1,0 +1,5 @@
+{
+  "check": "scripts/check",
+  "static": "scripts/check --static",
+  "default_branch": "main"
+}
