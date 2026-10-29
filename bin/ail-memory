@@ -1,0 +1,177 @@
+#!/usr/bin/env python3
+"""Transport one v1 memory request. Success means confirmed server completion.
+
+Contract (v1, unchanged): one JSON request {version, sql, params} on stdin; the result
+on stdout; on failure a bounded v1 JSON error on stderr that never contains the
+endpoint address, the Authorization value, the SQL or its parameters. HTTPS only, no
+redirects, no automatic retry. `prepare()` and `exchange()` are shared with the
+bundle fetcher (hooks/cloud_bundle.py) so both requests follow the same rules.
+"""
+
+import http.client
+import json
+import math
+import os
+import signal
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from typing import Any
+
+REQUEST_LIMIT = 65536
+RESPONSE_LIMIT = 1048576
+TRANSPORT_ERRORS = (ValueError, TypeError, UnicodeError, RecursionError, OSError, urllib.error.URLError,
+                    http.client.HTTPException)
+
+
+def failure(outcome: str, code: str, message: str) -> int:
+    print(json.dumps({"version": 1, "error": {
+        "code": code, "message": message, "outcome": outcome,
+    }}), file=sys.stderr)
+    return 1
+
+
+def reject_constant(_value: str) -> None:
+    raise ValueError("nonfinite JSON")
+
+
+def finite_float(value: str) -> float:
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("nonfinite JSON number")
+    return number
+
+
+def parse(raw: bytes) -> Any:
+    return json.loads(raw, parse_constant=reject_constant, parse_float=finite_float)
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    # A followed redirect would forward the Authorization value to another origin.
+    def redirect_request(self, req: Any, fp: Any, code: Any, msg: Any, headers: Any, newurl: Any) -> None:
+        return None
+
+
+def deadline(_signum: int, _frame: Any) -> None:
+    raise TimeoutError("request deadline")
+
+
+def prepare(method: str, suffix: str = "", data: bytes | None = None,
+            headers: dict[str, str] | None = None) -> tuple[urllib.request.Request, float]:
+    """One request to the endpoint (its path + suffix) and its timeout; ValueError when unsafe."""
+    url = os.environ.get("AIL_MEMORY_URL", "")
+    parts = urllib.parse.urlsplit(url)
+    loopback = (os.environ.get("AIL_MEMORY_ALLOW_LOOPBACK") == "1"
+                and parts.scheme == "http" and parts.hostname == "127.0.0.1")
+    if (not parts.hostname or parts.username is not None or parts.password is not None
+            or parts.fragment or (parts.scheme != "https" and not loopback)
+            or any(ord(c) <= 32 for c in url)):
+        raise ValueError("endpoint")
+    # Validate malformed ports before dispatch.
+    _ = parts.port
+    timeout = float(os.environ.get("AIL_MEMORY_TIMEOUT_SECONDS", "15"))
+    if not math.isfinite(timeout) or not 1 <= timeout <= 60:
+        raise ValueError("timeout")
+    headers = dict(headers or {})
+    authorization = os.environ.get("AIL_MEMORY_AUTHORIZATION")
+    if authorization is None:
+        # Only the Claude cloud proxy injects the credential; anywhere else nothing is sent.
+        if os.environ.get("CLAUDE_CODE_REMOTE") != "true":
+            raise ValueError("credential delivery")
+    elif not authorization.strip() or any(ord(c) < 32 or ord(c) > 126 for c in authorization):
+        raise ValueError("authorization")
+    else:
+        headers["Authorization"] = authorization
+    path = (parts.path.rstrip("/") + suffix) if suffix else (parts.path or "/")
+    path = urllib.parse.urlunsplit(("", "", path, parts.query, ""))
+    if loopback:
+        request = urllib.request.Request(f"http://127.0.0.1:{parts.port or 80}{path}", data=data, headers=headers,
+                                         method=method)
+    else:
+        request = urllib.request.Request(f"https://{parts.netloc}{path}", data=data, headers=headers, method=method)
+    return request, timeout
+
+
+def exchange(request: urllib.request.Request, timeout: float, limit: int) -> tuple[int, bytes]:
+    """Send once, within `timeout`; return the status and at most limit+1 body bytes.
+
+    Raises on timeout, transport failure or broken framing. The caller must refuse a body
+    longer than `limit`: it is never truncated into something that looks complete.
+    """
+    signal.signal(signal.SIGALRM, deadline)
+    try:
+        signal.setitimer(signal.ITIMER_REAL, timeout)
+        opener = urllib.request.build_opener(NoRedirect())
+        try:
+            response = opener.open(request, timeout=timeout)
+        except urllib.error.HTTPError as error:
+            response = error
+        with response:
+            status = response.code
+            lengths = response.headers.get_all("Content-Length", [])
+            if lengths and (len(lengths) != 1 or not lengths[0].isascii() or not lengths[0].isdigit()):
+                raise ValueError("response framing")
+            if lengths and int(lengths[0]) > limit:
+                raise ValueError("response size")
+            raw = response.read(limit + 1)
+            # A bounded HTTPResponse.read does not raise on premature EOF.
+            # Check framing before trusting either success or known refusal.
+            if lengths and len(raw) != int(lengths[0]):
+                raise ValueError("incomplete response")
+    finally:
+        # A socket timeout can beat the watchdog. Disarm it before reporting
+        # either result, so it cannot interrupt a structured diagnostic.
+        signal.setitimer(signal.ITIMER_REAL, 0)
+    return status, raw
+
+
+def main() -> int:
+    try:
+        raw = sys.stdin.buffer.read(REQUEST_LIMIT + 1)
+        if len(raw) > REQUEST_LIMIT:
+            raise ValueError("request size")
+        request = parse(raw)
+        if (not isinstance(request, dict) or set(request) != {"version", "sql", "params"}
+                or type(request["version"]) is not int or request["version"] != 1
+                or not isinstance(request["sql"], str) or not request["sql"].strip()
+                or not isinstance(request["params"], list)):
+            raise ValueError("request shape")
+        body = json.dumps(request, ensure_ascii=False, allow_nan=False).encode()
+        if len(body) > REQUEST_LIMIT:
+            raise ValueError("request size")
+        outgoing, timeout = prepare("POST", data=body, headers={"Content-Type": "application/json"})
+    except (ValueError, TypeError, UnicodeError, RecursionError, OSError):
+        return failure("not_executed", "configuration", "Memory request blocked: invalid input or configuration.")
+
+    try:
+        status, raw = exchange(outgoing, timeout, RESPONSE_LIMIT)
+        if len(raw) > RESPONSE_LIMIT:
+            raise ValueError("response size")
+        result = parse(raw)
+        if not isinstance(result, dict) or type(result.get("version")) is not int or result["version"] != 1:
+            raise ValueError("response version")
+        error = result.get("error")
+        if isinstance(error, dict):
+            if (not 400 <= status <= 599 or set(result) != {"version", "error"}
+                    or set(error) != {"code", "message", "outcome"}
+                    or not isinstance(error["code"], str) or not error["code"]
+                    or not isinstance(error["message"], str) or not error["message"]
+                    or error["outcome"] not in ("not_executed", "rolled_back", "unknown")):
+                raise ValueError("refusal")
+            return failure(error["outcome"], "refused", "Memory request blocked: server refused the request.")
+        columns, rows = result.get("columns"), result.get("rows")
+        if (status != 200 or set(result) != {"version", "columns", "rows"}
+                or not isinstance(columns, list) or not all(isinstance(c, str) for c in columns)
+                or not isinstance(rows, list)
+                or not all(isinstance(r, list) and len(r) == len(columns) for r in rows)):
+            raise ValueError("response shape")
+        print(json.dumps(result, ensure_ascii=False, allow_nan=False))
+        return 0
+    except TRANSPORT_ERRORS:
+        return failure("unknown", "unconfirmed",
+                       "Memory request blocked: outcome unconfirmed; stop and reconcile after recovery.")
+
+
+if __name__ == "__main__":
+    sys.exit(main())
